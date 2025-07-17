@@ -7,6 +7,7 @@ const {
 const { DisTube } = require("distube");
 const { SpotifyPlugin } = require("@distube/spotify");
 const { YouTubePlugin } = require("@distube/youtube");
+const { token } = require("./config.json");
 require("dotenv").config();
 
 const client = new Client({
@@ -264,7 +265,7 @@ const commands = {
     }
   },
 
-  queue: (message) => {
+  queue: (message, args) => {
     const queue = distube.getQueue(message.guild.id);
     if (!queue) {
       return message.reply({
@@ -272,21 +273,81 @@ const commands = {
       });
     }
 
-    const q = queue.songs
-      .map(
-        (song, i) =>
-          `${i === 0 ? "**Now Playing:**" : `${i}.`} [${song.name}](${
-            song.url
-          }) - \`${formatDuration(song.duration)}\``
-      )
-      .slice(0, 10);
+    // Parse page number if provided
+    const page = parseInt(args[0]) || 1;
+    const songsPerPage = 10;
+    const startIndex = (page - 1) * songsPerPage;
+    const endIndex = startIndex + songsPerPage;
+    const totalPages = Math.ceil(queue.songs.length / songsPerPage);
+
+    // Validate page number
+    if (page < 1 || page > totalPages) {
+      return message.reply({
+        embeds: [
+          createErrorEmbed(
+            `Invalid page number! Please use a number between 1 and ${totalPages}.`
+          ),
+        ],
+      });
+    }
+
+    const songsToShow = queue.songs.slice(startIndex, endIndex);
+
+    const q = songsToShow.map((song, i) => {
+      const actualIndex = startIndex + i;
+      const playlistInfo = song.playlist ? ` 📋` : "";
+
+      if (actualIndex === 0) {
+        return `**🎵 Now Playing:** [${song.name}](${
+          song.url
+        }) - \`${formatDuration(song.duration)}\`${playlistInfo}`;
+      } else {
+        return `**${actualIndex + 1}.** [${song.name}](${
+          song.url
+        }) - \`${formatDuration(song.duration)}\`${playlistInfo}`;
+      }
+    });
 
     const embed = new EmbedBuilder()
       .setTitle("🎵 Current Queue")
       .setDescription(q.join("\n"))
       .setColor(EMBED_COLOR)
-      .setFooter({ text: `Total songs: ${queue.songs.length}` })
+      .setFooter({
+        text: `Page ${page}/${totalPages} | Total songs: ${queue.songs.length} | Use %skipto <number> to skip to a specific song`,
+      })
       .setTimestamp();
+
+    // Add current playlist info if available
+    const currentSong = queue.songs[0];
+    if (currentSong.playlist) {
+      embed.addFields({
+        name: "📋 Current Playlist",
+        value: `[${currentSong.playlist.name}](${currentSong.playlist.url})`,
+        inline: true,
+      });
+    }
+
+    // Add navigation info for multiple pages
+    if (totalPages > 1) {
+      embed.addFields({
+        name: "📄 Navigation",
+        value: `Use \`%queue <page>\` to view other pages (1-${totalPages})`,
+        inline: false,
+      });
+    }
+
+    // Add playlist statistics
+    const playlistSongs = queue.songs.filter((song) => song.playlist);
+    if (playlistSongs.length > 0) {
+      const playlistCount = [
+        ...new Set(playlistSongs.map((song) => song.playlist?.name)),
+      ].length;
+      embed.addFields({
+        name: "📊 Playlist Info",
+        value: `${playlistSongs.length} songs from ${playlistCount} playlist(s)`,
+        inline: true,
+      });
+    }
 
     message.reply({ embeds: [embed] });
   },
@@ -360,6 +421,11 @@ const commands = {
           name: `${PREFIX}nowplaying`,
           value: "Show current song info",
           inline: true,
+        },
+        {
+          name: `${PREFIX}skipto <number>`,
+          value: "Skip forward to a specific song in playlist. Only goes forward!!",
+          inline: true
         }
       )
       .setColor(EMBED_COLOR)
@@ -367,58 +433,132 @@ const commands = {
 
     message.reply({ embeds: [embed] });
   },
-  leave: (message) => {
+  skipto: async (message, args) => {
     // Check if user is in a voice channel
-    if (!message.member.voice.channel) {
+    if (!checkVoiceChannel(message)) return;
+
+    // Check if there's a queue
+    const queue = distube.getQueue(message.guild.id);
+    if (!queue) {
+      return message.reply({
+        embeds: [createErrorEmbed("Nothing is playing right now!")],
+      });
+    }
+
+    // Check if position argument is provided
+    if (!args[0]) {
       return message.reply({
         embeds: [
           createErrorEmbed(
-            "You need to be in a voice channel to use this command!"
+            "Please provide a position number! Use `%queue` to see song positions."
           ),
         ],
       });
     }
 
-    // Check if bot is in a voice channel
-    if (!message.guild.members.me.voice.channel) {
+    // Parse the position number
+    const position = parseInt(args[0]);
+
+    // Validate the position number
+    if (isNaN(position) || position < 1) {
       return message.reply({
-        embeds: [createErrorEmbed("I am not connected to any voice channel!")],
+        embeds: [
+          createErrorEmbed(
+            "Please provide a valid position number (1 or higher)!"
+          ),
+        ],
       });
     }
 
-    // Check if user is in the same voice channel as the bot
-    if (
-      message.member.voice.channel.id !==
-      message.guild.members.me.voice.channel.id
-    ) {
+    // Check if position exists in queue (position 1 is currently playing)
+    if (position > queue.songs.length) {
       return message.reply({
         embeds: [
-          createErrorEmbed("You need to be in the same voice channel as me!"),
+          createErrorEmbed(
+            `There are only ${queue.songs.length} songs in the queue! Use \`%queue\` to see all songs.`
+          ),
+        ],
+      });
+    }
+
+    // Check if trying to skip to currently playing song
+    if (position === 1) {
+      return message.reply({
+        embeds: [
+          createErrorEmbed(
+            "This song is already playing! Use `%skip` to skip to the next song."
+          ),
         ],
       });
     }
 
     try {
-      // Get the current queue
-      const queue = distube.getQueue(message.guild.id);
+      // Get the target song info before skipping
+      const targetSong = queue.songs[position - 1];
 
-      if (queue) {
-        // Stop the music and clear the queue
-        distube.stop(message.guild.id);
+      // Send loading message for longer operations
+      const loadingEmbed = new EmbedBuilder()
+        .setTitle("⏳ Processing...")
+        .setDescription(`Skipping to position ${position}...`)
+        .setColor("#ffff00")
+        .setTimestamp();
+
+      const loadingMsg = await message.reply({ embeds: [loadingEmbed] });
+
+      // Use DisTube's jump method if available (more efficient)
+      if (typeof distube.jump === "function") {
+        await distube.jump(message.guild.id, position - 1);
+      } else {
+        // Fallback: Skip multiple songs to reach the target position
+        const songsToSkip = position - 1;
+
+        // Skip songs one by one with small delays to prevent rate limiting
+        for (let i = 0; i < songsToSkip; i++) {
+          if (queue.songs.length > 1) {
+            await distube.skip(message.guild.id);
+            // Small delay to prevent overwhelming the API
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
       }
 
-      // Leave the voice channel
-      message.guild.members.me.voice.disconnect();
+      // Send success message with detailed info
+      const embed = new EmbedBuilder()
+        .setTitle("⏭️ Skipped to Song")
+        .setDescription(`Now playing: [${targetSong.name}](${targetSong.url})`)
+        .addFields(
+          { name: "Position", value: `${position}`, inline: true },
+          {
+            name: "Duration",
+            value: formatDuration(targetSong.duration),
+            inline: true,
+          },
+          {
+            name: "Requested by",
+            value: targetSong.user.username,
+            inline: true,
+          }
+        )
+        .setThumbnail(targetSong.thumbnail)
+        .setColor(EMBED_COLOR)
+        .setTimestamp();
 
-      message.reply({
-        embeds: [createSuccessEmbed("👋 Successfully left the voice channel!")],
-      });
+      // Check if song is from a playlist
+      if (targetSong.playlist) {
+        embed.addFields({
+          name: "📋 From Playlist",
+          value: `[${targetSong.playlist.name}](${targetSong.playlist.url})`,
+          inline: false,
+        });
+      }
+
+      await loadingMsg.edit({ embeds: [embed] });
     } catch (error) {
-      console.error("Leave command error:", error);
+      console.error("Skip to command error:", error);
       message.reply({
         embeds: [
           createErrorEmbed(
-            "An error occurred while trying to leave the voice channel."
+            "An error occurred while trying to skip to that song. Please try again."
           ),
         ],
       });
@@ -429,7 +569,15 @@ const commands = {
 // Event handlers
 client.on("ready", () => {
   console.log(`${client.user.tag} is online!`);
-  client.user.setActivity("music", { type: "LISTENING" });
+  client.user.setPresence({
+    activities: [
+      {
+        name: "🎶 %play for music ",
+        type: 4,
+      },
+    ],
+    status: "online",
+  });
 });
 
 client.on("messageCreate", async (message) => {
@@ -546,4 +694,4 @@ process.on("uncaughtException", (error) => {
 });
 
 // Login
-client.login(process.env.TOKEN);
+client.login(process.env.TOKEN || token);
