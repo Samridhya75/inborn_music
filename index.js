@@ -4,7 +4,7 @@ const {
   EmbedBuilder,
   PermissionsBitField,
 } = require("discord.js");
-const { DisTube } = require("distube");
+const { DisTube,isVoiceChannelEmpty } = require("distube");
 const { SpotifyPlugin } = require("@distube/spotify");
 const { YouTubePlugin } = require("@distube/youtube");
 const { token } = require("./config.json");
@@ -602,6 +602,18 @@ client.on("messageCreate", async (message) => {
   }
 });
 
+client.on("voiceStateUpdate", (oldState) => {
+  if (!oldState?.channel) return;
+  const queue = distube.getQueue(oldState.guild);
+  if (!queue) return;
+  if (isVoiceChannelEmpty(oldState)) {
+    queue.stop();
+    queue.textChannel.send({
+      embeds: [createEmbed("Queue cleared","There is no one in the channel!")]
+    });
+  }
+});
+
 // DisTube event handlers
 distube.on("playSong", (queue, song) => {
   const embed = new EmbedBuilder()
@@ -649,23 +661,13 @@ distube.on("addList", (queue, playlist) => {
   queue.textChannel.send({ embeds: [embed] });
 });
 
-distube.on("error", (textChannel, error) => {
-  console.error("DisTube error:", error);
-  textChannel.send({
+distube.on("error", (queue, e) => {
+  console.error("DisTube error:", e);
+  queue.textChannel.send({
     embeds: [createErrorEmbed("An error occurred with the music player.")],
   });
 });
 
-distube.on("empty", (queue) => {
-  queue.textChannel.send({
-    embeds: [
-      createEmbed(
-        "👋 Goodbye",
-        "Voice channel is empty. Leaving the channel..."
-      ),
-    ],
-  });
-});
 
 distube.on("finish", (queue) => {
   queue.textChannel.send({
